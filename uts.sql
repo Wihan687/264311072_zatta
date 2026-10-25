@@ -1,74 +1,89 @@
-USE smart_agriculture_db;
+-- ---------------------------------------------------------------------
+-- A. LATAR BELAKANG KEBUTUHAN
+-- ---------------------------------------------------------------------
+-- Sistem harus bisa mengenali hasil pengukuran yang keluar dari batas
+-- wajar, contohnya tanah yang terlalu asam atau suhu yang terlalu panas.
+-- Supaya aturannya seragam, batas bawah dan atas (nilai_min, nilai_max)
+-- disimpan di satu tempat, yaitu master jenis_sensor, sehingga seluruh
+-- sensor dengan jenis yang sama otomatis memakai standar yang sama.
 
--- 1. Tabel jenis_sensor --
-CREATE TABLE IF NOT EXISTS jenis_sensor (
-    id_jenis    INT NOT NULL AUTO_INCREMENT,
-    nama_jenis  VARCHAR(100) NOT NULL,
-    satuan      VARCHAR(20)  NOT NULL,
-    batas_min   DECIMAL(10,2) NOT NULL,
-    batas_max   DECIMAL(10,2) NOT NULL,
-    PRIMARY KEY (id_jenis),
-    UNIQUE KEY uk_nama_jenis (nama_jenis),
-    CONSTRAINT ck_jenis_batas CHECK (batas_min < batas_max)
+-- ---------------------------------------------------------------------
+-- B. TINJAUAN NORMALISASI
+-- ---------------------------------------------------------------------
+-- Struktur sebelumnya:
+--   sensor(id_sensor, id_zona, nama_sensor, jenis_sensor,
+--          status_sensor, satuan)
+--
+-- 1NF : Setiap atribut bernilai tunggal dan tiap baris dapat dikenali
+--       lewat id_sensor. SUDAH TERPENUHI.
+--
+-- 2NF : Kunci utama hanya satu kolom (id_sensor), jadi tidak mungkin
+--       ada ketergantungan pada sebagian kunci. SUDAH TERPENUHI.
+--
+-- 3NF : BELUM terpenuhi karena ada ketergantungan transitif:
+--           id_sensor -> jenis_sensor -> satuan
+--       Satuan sebenarnya ditentukan oleh jenis sensor, bukan oleh
+--       masing-masing sensor. Akibatnya "Suhu Udara = °C" ditulis
+--       berulang pada setiap sensor suhu, sehingga berisiko terjadi
+--       anomali pembaruan dan data yang tidak seragam.
+--
+-- Penyelesaian: atribut yang bergantung pada jenis sensor dipindahkan
+-- ke tabel tersendiri.
+--   jenis_sensor(id_jenis, nama_jenis, satuan, nilai_min, nilai_max)
+--   sensor(id_sensor, id_zona, id_jenis, nama_sensor, status_sensor)
+--
+-- Dengan begitu, setiap atribut non-kunci hanya bergantung pada
+-- primary key tabelnya sendiri, dan 3NF TERPENUHI.
+-- Kardinalitas: JENIS_SENSOR (1) ---- (N) SENSOR
+
+-- ---------------------------------------------------------------------
+-- C. PEMBUATAN TABEL (DDL)
+-- ---------------------------------------------------------------------
+
+-- Tabel master jenis sensor
+CREATE TABLE `jenis_sensor` (
+  `id_jenis`   int NOT NULL AUTO_INCREMENT,
+  `nama_jenis` varchar(50) NOT NULL,
+  `satuan`     varchar(20) NOT NULL,
+  `nilai_min`  decimal(10,2) NOT NULL,
+  `nilai_max`  decimal(10,2) NOT NULL,
+  PRIMARY KEY (`id_jenis`),
+  UNIQUE KEY `uk_nama_jenis` (`nama_jenis`),
+  CONSTRAINT `chk_ambang_batas` CHECK (`nilai_min` < `nilai_max`)
 ) ENGINE=InnoDB;
 
--- 2. Data awal --
-INSERT INTO jenis_sensor (nama_jenis, satuan, batas_min, batas_max) VALUES
-    ('Kelembaban Tanah', '%',  40.00, 80.00),
-    ('Suhu Udara',       '°C', 20.00, 35.00),
-    ('pH Tanah',         'pH',  5.50,  7.00);
+-- Tabel sensor dengan struktur yang sudah dinormalisasi
+CREATE TABLE `sensor` (
+  `id_sensor`     int NOT NULL AUTO_INCREMENT,
+  `id_zona`       int NOT NULL,
+  `id_jenis`      int NOT NULL,
+  `nama_sensor`   varchar(100) NOT NULL,
+  `status_sensor` varchar(30) NOT NULL,
+  PRIMARY KEY (`id_sensor`),
+  KEY `fk_sensor_zona` (`id_zona`),
+  KEY `fk_sensor_jenis` (`id_jenis`),
+  KEY `idx_sensor_status` (`status_sensor`),
+  CONSTRAINT `fk_sensor_zona` FOREIGN KEY (`id_zona`)
+    REFERENCES `zona_lahan` (`id_zona`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_sensor_jenis` FOREIGN KEY (`id_jenis`)
+    REFERENCES `jenis_sensor` (`id_jenis`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `chk_status_sensor` CHECK (`status_sensor` IN ('Aktif','Perawatan','Nonaktif'))
+) ENGINE=InnoDB;
 
--- 3. Tambah kolom id_jenis di sensor --
-ALTER TABLE sensor ADD COLUMN id_jenis INT NULL AFTER id_zona;
+-- ---------------------------------------------------------------------
+-- D. PENGISIAN DATA
+-- ---------------------------------------------------------------------
 
--- 4. Isi id_jenis dari teks jenis_sensor yang lama --
-UPDATE sensor s
-JOIN jenis_sensor j ON LOWER(TRIM(s.jenis_sensor)) = LOWER(j.nama_jenis)
-SET s.id_jenis = j.id_jenis;
+-- Data master jenis sensor
+INSERT INTO `jenis_sensor` (`id_jenis`, `nama_jenis`, `satuan`, `nilai_min`, `nilai_max`) VALUES
+(1, 'Kelembaban Tanah', '%',  40.00, 80.00),
+(2, 'Suhu Udara',       '°C', 20.00, 35.00),
+(3, 'pH Tanah',         'pH',  5.50,  7.50);
 
--- 5. Cek: hasilnya harus KOSONG sebelum lanjut ke langkah 6
-SELECT id_sensor, nama_sensor, jenis_sensor FROM sensor WHERE id_jenis IS NULL;
-
--- 6. Pasang relasi, hapus kolom lama --
-ALTER TABLE sensor
-    MODIFY id_jenis INT NOT NULL,
-    ADD CONSTRAINT fk_sensor_jenis FOREIGN KEY (id_jenis)
-        REFERENCES jenis_sensor (id_jenis)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    DROP COLUMN jenis_sensor,
-    DROP COLUMN satuan;
-
--- 7. Trigger: peringatan otomatis bila nilai ukur di luar batas --
-DROP TRIGGER IF EXISTS trg_pengukuran_peringatan;
-DELIMITER $$
-CREATE TRIGGER trg_pengukuran_peringatan
-AFTER INSERT ON pengukuran
-FOR EACH ROW
-BEGIN
-    DECLARE v_min     DECIMAL(10,2);
-    DECLARE v_max     DECIMAL(10,2);
-    DECLARE v_selisih DECIMAL(10,2);
-    DECLARE v_risiko  VARCHAR(30);
-
-    SELECT j.batas_min, j.batas_max INTO v_min, v_max
-      FROM sensor s
-      JOIN jenis_sensor j ON j.id_jenis = s.id_jenis
-     WHERE s.id_sensor = NEW.id_sensor;
-
-    IF NEW.nilai_ukur < v_min OR NEW.nilai_ukur > v_max THEN
-        SET v_selisih = IF(NEW.nilai_ukur < v_min,
-                           v_min - NEW.nilai_ukur,
-                           NEW.nilai_ukur - v_max);
-        SET v_risiko = CASE
-                           WHEN v_selisih <  0.10 * (v_max - v_min) THEN 'Rendah'
-                           WHEN v_selisih <= 0.25 * (v_max - v_min) THEN 'Sedang'
-                           ELSE 'Tinggi'
-                       END;
-
-        INSERT INTO peringatan
-            (id_sensor, waktu_ukur, waktu_peringatan, status_peringatan, tingkat_risiko)
-        VALUES
-            (NEW.id_sensor, NEW.waktu_ukur, GREATEST(NOW(), NEW.waktu_ukur), 'Aktif', v_risiko);
-    END IF;
-END$$
-DELIMITER ;
+-- Data sensor
+INSERT INTO `sensor` (`id_sensor`, `id_zona`, `id_jenis`, `nama_sensor`, `status_sensor`) VALUES
+(1, 1, 1, 'Sensor Kelembaban A1', 'Aktif'),
+(2, 1, 2, 'Sensor Suhu A1',       'Aktif'),
+(3, 2, 3, 'Sensor pH B1',         'Aktif'),
+(4, 2, 1, 'Sensor Kelembaban B1', 'Perawatan'),
+(5, 3, 2, 'Sensor Suhu C1',       'Aktif');
