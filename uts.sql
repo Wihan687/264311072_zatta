@@ -1,89 +1,108 @@
--- ---------------------------------------------------------------------
+
 -- A. LATAR BELAKANG KEBUTUHAN
 -- ---------------------------------------------------------------------
--- Sistem harus bisa mengenali hasil pengukuran yang keluar dari batas
--- wajar, contohnya tanah yang terlalu asam atau suhu yang terlalu panas.
--- Supaya aturannya seragam, batas bawah dan atas (nilai_min, nilai_max)
--- disimpan di satu tempat, yaitu master jenis_sensor, sehingga seluruh
--- sensor dengan jenis yang sama otomatis memakai standar yang sama.
+-- Usaha berkembang dari satu jenis tanaman menjadi beberapa tanaman.
+-- Batas wajar pengukuran (kelembaban, pH, suhu) berbeda untuk tiap
+-- tanaman, sehingga sistem harus menilai hasil pengukuran memakai
+-- ambang batas sesuai tanaman yang ditanam di zona tersebut, bukan
+-- satu standar per jenis sensor.
 
 -- ---------------------------------------------------------------------
 -- B. TINJAUAN NORMALISASI
 -- ---------------------------------------------------------------------
--- Struktur sebelumnya:
---   sensor(id_sensor, id_zona, nama_sensor, jenis_sensor,
---          status_sensor, satuan)
---
--- 1NF : Setiap atribut bernilai tunggal dan tiap baris dapat dikenali
---       lewat id_sensor. SUDAH TERPENUHI.
---
--- 2NF : Kunci utama hanya satu kolom (id_sensor), jadi tidak mungkin
---       ada ketergantungan pada sebagian kunci. SUDAH TERPENUHI.
---
--- 3NF : BELUM terpenuhi karena ada ketergantungan transitif:
---           id_sensor -> jenis_sensor -> satuan
---       Satuan sebenarnya ditentukan oleh jenis sensor, bukan oleh
---       masing-masing sensor. Akibatnya "Suhu Udara = °C" ditulis
---       berulang pada setiap sensor suhu, sehingga berisiko terjadi
---       anomali pembaruan dan data yang tidak seragam.
---
--- Penyelesaian: atribut yang bergantung pada jenis sensor dipindahkan
--- ke tabel tersendiri.
+-- Sebelumnya:
+--   zona_lahan(id_zona, nama_zona, luas_lahan, jenis_tanaman)
 --   jenis_sensor(id_jenis, nama_jenis, satuan, nilai_min, nilai_max)
---   sensor(id_sensor, id_zona, id_jenis, nama_sensor, status_sensor)
 --
--- Dengan begitu, setiap atribut non-kunci hanya bergantung pada
--- primary key tabelnya sendiri, dan 3NF TERPENUHI.
--- Kardinalitas: JENIS_SENSOR (1) ---- (N) SENSOR
+-- 1NF : jenis_tanaman berupa teks bebas ("Padi"/"padi") sehingga nilainya
+--       tidak seragam. Dijadikan master tanaman dan direferensikan FK.
+-- 2NF : batas_min dan batas_max kini ditentukan oleh kombinasi
+--       (id_tanaman, id_jenis), bukan id_jenis saja. Bila tetap di
+--       jenis_sensor, atribut bergantung pada sebagian kunci. Dipindah
+--       ke tabel ambang_batas yang berkunci kandidat komposit.
+-- 3NF : tidak ada atribut non-kunci yang bergantung pada atribut
+--       non-kunci lain di kedua tabel baru. TERPENUHI.
+--
+-- Hasil:
+--   tanaman(id_tanaman, nama_tanaman)
+--   ambang_batas(id_ambang, id_tanaman, id_jenis, batas_min, batas_max)
+--   jenis_sensor(id_jenis, nama_jenis, satuan)
+--   zona_lahan(id_zona, nama_zona, luas_lahan, id_tanaman)
+-- Kardinalitas: TANAMAN (1)--(N) AMBANG_BATAS (N)--(1) JENIS_SENSOR
+--               TANAMAN (1)--(N) ZONA_LAHAN
 
 -- ---------------------------------------------------------------------
--- C. PEMBUATAN TABEL (DDL)
+-- C. PEMBUATAN TABEL (DDL) DAN MIGRASI
 -- ---------------------------------------------------------------------
 
--- Tabel master jenis sensor
-CREATE TABLE `jenis_sensor` (
-  `id_jenis`   int NOT NULL AUTO_INCREMENT,
-  `nama_jenis` varchar(50) NOT NULL,
-  `satuan`     varchar(20) NOT NULL,
-  `nilai_min`  decimal(10,2) NOT NULL,
-  `nilai_max`  decimal(10,2) NOT NULL,
-  PRIMARY KEY (`id_jenis`),
-  UNIQUE KEY `uk_nama_jenis` (`nama_jenis`),
-  CONSTRAINT `chk_ambang_batas` CHECK (`nilai_min` < `nilai_max`)
+CREATE TABLE `tanaman` (
+  `id_tanaman`   int NOT NULL AUTO_INCREMENT,
+  `nama_tanaman` varchar(100) NOT NULL,
+  PRIMARY KEY (`id_tanaman`),
+  UNIQUE KEY `uk_nama_tanaman` (`nama_tanaman`)
 ) ENGINE=InnoDB;
 
--- Tabel sensor dengan struktur yang sudah dinormalisasi
-CREATE TABLE `sensor` (
-  `id_sensor`     int NOT NULL AUTO_INCREMENT,
-  `id_zona`       int NOT NULL,
-  `id_jenis`      int NOT NULL,
-  `nama_sensor`   varchar(100) NOT NULL,
-  `status_sensor` varchar(30) NOT NULL,
-  PRIMARY KEY (`id_sensor`),
-  KEY `fk_sensor_zona` (`id_zona`),
-  KEY `fk_sensor_jenis` (`id_jenis`),
-  KEY `idx_sensor_status` (`status_sensor`),
-  CONSTRAINT `fk_sensor_zona` FOREIGN KEY (`id_zona`)
-    REFERENCES `zona_lahan` (`id_zona`) ON DELETE RESTRICT ON UPDATE CASCADE,
-  CONSTRAINT `fk_sensor_jenis` FOREIGN KEY (`id_jenis`)
+INSERT INTO `tanaman` (`nama_tanaman`)
+SELECT DISTINCT TRIM(`jenis_tanaman`) FROM `zona_lahan`
+WHERE `jenis_tanaman` IS NOT NULL AND TRIM(`jenis_tanaman`) <> '';
+
+CREATE TABLE `ambang_batas` (
+  `id_ambang`  int NOT NULL AUTO_INCREMENT,
+  `id_tanaman` int NOT NULL,
+  `id_jenis`   int NOT NULL,
+  `batas_min`  decimal(10,2) NOT NULL,
+  `batas_max`  decimal(10,2) NOT NULL,
+  PRIMARY KEY (`id_ambang`),
+  UNIQUE KEY `uk_tanaman_jenis` (`id_tanaman`, `id_jenis`),
+  KEY `fk_ambang_jenis` (`id_jenis`),
+  CONSTRAINT `fk_ambang_tanaman` FOREIGN KEY (`id_tanaman`)
+    REFERENCES `tanaman` (`id_tanaman`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_ambang_jenis` FOREIGN KEY (`id_jenis`)
     REFERENCES `jenis_sensor` (`id_jenis`) ON DELETE RESTRICT ON UPDATE CASCADE,
-  CONSTRAINT `chk_status_sensor` CHECK (`status_sensor` IN ('Aktif','Perawatan','Nonaktif'))
+  CONSTRAINT `chk_ambang_min_max` CHECK (`batas_min` < `batas_max`)
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------
--- D. PENGISIAN DATA
--- ---------------------------------------------------------------------
+-- Salin batas lama sebagai nilai awal tiap tanaman
+INSERT INTO `ambang_batas` (`id_tanaman`, `id_jenis`, `batas_min`, `batas_max`)
+SELECT t.`id_tanaman`, js.`id_jenis`, js.`nilai_min`, js.`nilai_max`
+FROM `tanaman` t CROSS JOIN `jenis_sensor` js;
 
--- Data master jenis sensor
-INSERT INTO `jenis_sensor` (`id_jenis`, `nama_jenis`, `satuan`, `nilai_min`, `nilai_max`) VALUES
-(1, 'Kelembaban Tanah', '%',  40.00, 80.00),
-(2, 'Suhu Udara',       '°C', 20.00, 35.00),
-(3, 'pH Tanah',         'pH',  5.50,  7.50);
+-- zona_lahan: ganti teks bebas dengan FK
+ALTER TABLE `zona_lahan` ADD COLUMN `id_tanaman` int NULL;
+UPDATE `zona_lahan` z
+JOIN `tanaman` t ON t.`nama_tanaman` = TRIM(z.`jenis_tanaman`)
+SET z.`id_tanaman` = t.`id_tanaman`;
+ALTER TABLE `zona_lahan`
+  ADD CONSTRAINT `fk_zona_tanaman` FOREIGN KEY (`id_tanaman`)
+    REFERENCES `tanaman` (`id_tanaman`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
--- Data sensor
-INSERT INTO `sensor` (`id_sensor`, `id_zona`, `id_jenis`, `nama_sensor`, `status_sensor`) VALUES
-(1, 1, 1, 'Sensor Kelembaban A1', 'Aktif'),
-(2, 1, 2, 'Sensor Suhu A1',       'Aktif'),
-(3, 2, 3, 'Sensor pH B1',         'Aktif'),
-(4, 2, 1, 'Sensor Kelembaban B1', 'Perawatan'),
-(5, 3, 2, 'Sensor Suhu C1',       'Aktif');
+-- peringatan: catat aturan yang dilanggar
+ALTER TABLE `peringatan` ADD COLUMN `id_ambang` int NULL,
+  ADD CONSTRAINT `fk_peringatan_ambang` FOREIGN KEY (`id_ambang`)
+    REFERENCES `ambang_batas` (`id_ambang`) ON DELETE RESTRICT ON UPDATE CASCADE;
+UPDATE `peringatan` p
+JOIN `sensor` s       ON s.`id_sensor` = p.`id_sensor`
+JOIN `zona_lahan` z   ON z.`id_zona` = s.`id_zona`
+JOIN `ambang_batas` a ON a.`id_tanaman` = z.`id_tanaman` AND a.`id_jenis` = s.`id_jenis`
+SET p.`id_ambang` = a.`id_ambang`;
+
+-- Pembersihan kolom lama: jalankan HANYA setelah hasil migrasi dicek
+ALTER TABLE `jenis_sensor` DROP COLUMN `nilai_min`, DROP COLUMN `nilai_max`;
+ALTER TABLE `zona_lahan`   DROP COLUMN `jenis_tanaman`;
+
+-- ---------------------------------------------------------------------
+-- D. PENGISIAN DATA (contoh ilustrasi, bukan acuan agronomis)
+-- ---------------------------------------------------------------------
+INSERT IGNORE INTO `tanaman` (`nama_tanaman`) VALUES ('Padi'), ('Cabai'), ('Jagung');
+
+UPDATE `ambang_batas` a
+JOIN `tanaman` t      ON t.`id_tanaman` = a.`id_tanaman`
+JOIN `jenis_sensor` j ON j.`id_jenis` = a.`id_jenis`
+SET a.`batas_min` = 60.00, a.`batas_max` = 85.00
+WHERE t.`nama_tanaman` = 'Padi' AND j.`nama_jenis` = 'Kelembaban Tanah';
+
+UPDATE `ambang_batas` a
+JOIN `tanaman` t      ON t.`id_tanaman` = a.`id_tanaman`
+JOIN `jenis_sensor` j ON j.`id_jenis` = a.`id_jenis`
+SET a.`batas_min` = 50.00, a.`batas_max` = 70.00
+WHERE t.`nama_tanaman` = 'Cabai' AND j.`nama_jenis` = 'Kelembaban Tanah';
